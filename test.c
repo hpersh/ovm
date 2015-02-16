@@ -75,6 +75,14 @@ main (void)
 
 #endif
 
+#if 0
+  
+  ovm_inst_t foo;
+
+  OVM_INTEGER_NEWC(ovm, foo, 42);
+
+#endif
+
 #if 1
 
   union ovm_cval cv[1];

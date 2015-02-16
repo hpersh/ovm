@@ -116,8 +116,12 @@ enum {
   OVM_BMVAL_UNIT_BITS      = 1 << OVM_BMVAL_UNIT_BITS_LOG2
 };
 
+
 struct ovm_inst
 {
+#ifndef NDEBUG
+  unsigned long long magic;
+#endif
   struct list list_node[1];
   struct ovm_inst_page *inst_page;
   unsigned ref_cnt;
@@ -252,7 +256,10 @@ ovm_inst_of (ovm_inst_t inst)
 struct ovm_frame
 {
   struct ovm_frame *prev;
-  unsigned size;		/* In insts */
+  unsigned   size;		/* In insts */
+#ifndef NDEBUG
+  ovm_inst_t *start, *end;
+#endif
 };
 
 struct ovm

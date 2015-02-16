@@ -32,6 +32,10 @@ _ovm_frame_enter (ovm_t ovm, struct ovm_frame *fr, unsigned size)
 
   fr->prev = ovm->frp;
   fr->size = data_size / sizeof (ovm_inst_t);
+#ifndef NDEBUG
+  fr->start = (ovm_inst_t *)(fr + 1);
+  fr->end = fr->start + data_size;
+#endif
   memset (fr + 1, 0, data_size);
   ovm->frp = fr;
 }
@@ -124,6 +128,10 @@ _ovm_free(ovm_t ovm, void *p, unsigned size)
   ovm->stats->mem_in_use -= size;
 }
 
+enum {
+  _OVM_INST_MAGIC = 0x48504f564d494e53ULL
+};
+
 static ovm_inst_t
 _ovm_inst_alloc (ovm_t ovm, ovm_class_t cl)
 {
@@ -142,6 +150,9 @@ _ovm_inst_alloc (ovm_t ovm, ovm_class_t cl)
 
     for (q = (ovm_inst_t)(p + 1), n = ovm->insts_per_page; n; --n, ++q) {
       q->inst_page = p;
+#ifndef NDEBUG
+      q->magic     = 0;
+#endif
 
       list_insert(q->list_node, list_end(ovm->insts_free));
     }
@@ -152,6 +163,9 @@ _ovm_inst_alloc (ovm_t ovm, ovm_class_t cl)
   list_erase(result->list_node);
   list_insert(result->list_node, list_end(ovm->insts_in_use));
 
+#ifndef NDEBUG
+  result->magic = _OVM_INST_MAGIC;
+#endif
   result->ref_cnt = 0;
   result->inst_of = cl;
   memset(result->val, 0, sizeof(result->val));
@@ -172,6 +186,10 @@ _ovm_inst_free (ovm_t ovm, ovm_inst_t inst)
 
   list_erase(inst->list_node);
   list_insert(inst->list_node, list_end(ovm->insts_free));
+
+#ifndef NDEBUG
+  inst->magic = 0;
+#endif
 
   --ovm->stats->insts_in_use;
 
@@ -273,6 +291,34 @@ ovm_init (ovm_t ovm, unsigned inst_page_size)
   return (ovm);
 }
 
+#ifndef NDEBUG
+static inline void
+_ovm_dst_chk(ovm_t ovm, ovm_inst_t *dst)
+{
+  struct ovm_frame *p;
+
+  for (p = ovm->frp; p; p = p->prev) {
+    if (dst >= p->start && dst < p->end)  return;
+  }
+
+  OVM_ASSERT(0);
+}
+#else
+#define _ovm_dst_chk(ovm, dst)
+#endif
+
+#ifndef NDEBUG
+static inline ovm_inst_t
+_ovm_inst_chk(ovm_inst_t inst)
+{
+  OVM_ASSERT(inst == 0 || inst->magic == _OVM_INST_MAGIC);
+
+  return (inst);
+}
+#else
+#define _ovm_inst_chk(inst)  (inst)
+#endif
+
 void
 _ovm_inst_new (ovm_t ovm, ovm_inst_t * dst, ovm_class_t cl, unsigned argc, ...)
 {
@@ -282,9 +328,11 @@ _ovm_inst_new (ovm_t ovm, ovm_inst_t * dst, ovm_class_t cl, unsigned argc, ...)
 
   va_start(ap, argc);
 
+  _ovm_dst_chk(ovm, dst);
+
   for (p = argv, n = argc; n; --n, ++p)
     {
-      *p = va_arg (ap, ovm_inst_t);
+      *p = _ovm_inst_chk(va_arg (ap, ovm_inst_t));
     }
 
   (*cl->new)(ovm, cl, dst, argc, argv);
@@ -300,11 +348,13 @@ _ovm_method_call_run (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t rcvr,
   ovm_inst_t argv[1 + argc], *p;
   void (*f) (struct ovm *, ovm_inst_t *, unsigned, ovm_inst_t *);
 
-  argv[0] = rcvr;
+  _ovm_dst_chk(ovm, dst);
+
+  argv[0] = _ovm_inst_chk(rcvr);
 
   for (p = &argv[1], n = argc; n; --n, ++p)
     {
-      *p = va_arg (ap, ovm_inst_t);
+      *p = _ovm_inst_chk(va_arg (ap, ovm_inst_t));
     }
 
   OVM_ASSERT (sel < OVM_INST_METHOD_NUM_SELS);
@@ -464,12 +514,20 @@ struct ovm_class ovm_cl_object[1] = { {
 
 /***************************************************************************/
 
-void
-_ovm_bool_newc (ovm_t ovm, ovm_inst_t * dst, ovm_boolval_t val)
+static void
+__ovm_bool_newc (ovm_t ovm, ovm_inst_t * dst, ovm_boolval_t val)
 {
   _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_bool));
 
   BOOLVAL(*dst) = (val != 0);
+}
+
+void
+_ovm_bool_newc (ovm_t ovm, ovm_inst_t * dst, ovm_boolval_t val)
+{
+  _ovm_dst_chk(ovm, dst);
+
+  __ovm_bool_newc(ovm, dst, val);
 }
 
 static char *
@@ -526,7 +584,7 @@ _ovm_bool_not (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
   OVM_ASSERT (argc == 0);
   OVM_ASSERT (ovm_is_kind_of (argv[0], ovm_cl_bool));
 
-  _ovm_bool_newc (ovm, dst, !BOOLVAL(argv[0]));
+  __ovm_bool_newc (ovm, dst, !BOOLVAL(argv[0]));
 }
 
 static void
@@ -537,7 +595,7 @@ _ovm_bool_and (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
   OVM_ASSERT (ovm_is_kind_of (argv[0], ovm_cl_bool));
   OVM_ASSERT (ovm_is_kind_of (argv[1], ovm_cl_bool));
 
-  _ovm_bool_newc (ovm, dst, BOOLVAL(argv[0]) && BOOLVAL(argv[1]));
+  __ovm_bool_newc (ovm, dst, BOOLVAL(argv[0]) && BOOLVAL(argv[1]));
 }
 
 static void
@@ -548,7 +606,7 @@ _ovm_bool_or (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
   OVM_ASSERT (ovm_is_kind_of (argv[0], ovm_cl_bool));
   OVM_ASSERT (ovm_is_kind_of (argv[1], ovm_cl_bool));
 
-  _ovm_bool_newc (ovm, dst, BOOLVAL(argv[0]) || BOOLVAL(argv[1]));
+  __ovm_bool_newc (ovm, dst, BOOLVAL(argv[0]) || BOOLVAL(argv[1]));
 }
 
 static void
@@ -559,7 +617,7 @@ _ovm_bool_xor (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
   OVM_ASSERT (ovm_is_kind_of (argv[0], ovm_cl_bool));
   OVM_ASSERT (ovm_is_kind_of (argv[1], ovm_cl_bool));
 
-  _ovm_bool_newc (ovm, dst, BOOLVAL(argv[0]) ^ BOOLVAL(argv[1]));
+  __ovm_bool_newc (ovm, dst, BOOLVAL(argv[0]) ^ BOOLVAL(argv[1]));
 }
 
 struct ovm_class ovm_cl_bool[1] = { {
@@ -593,12 +651,20 @@ struct ovm_class ovm_cl_num[1] = { {
 
 /***************************************************************************/
 
-void
-_ovm_integer_newc (ovm_t ovm, ovm_inst_t * dst, ovm_intval_t val)
+static void
+__ovm_integer_newc (ovm_t ovm, ovm_inst_t * dst, ovm_intval_t val)
 {
   _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_integer));
 
   INTVAL(*dst) = val;
+}
+
+void
+_ovm_integer_newc (ovm_t ovm, ovm_inst_t * dst, ovm_intval_t val)
+{
+  _ovm_dst_chk(ovm, dst);
+
+  __ovm_integer_newc(ovm, dst, val);
 }
 
 static void
@@ -650,7 +716,7 @@ _ovm_integer_add (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
     OVM_ASSERT(0);
   }
 
-  _ovm_integer_newc (ovm, dst, INTVAL(argv[0]) + arg);
+  __ovm_integer_newc (ovm, dst, INTVAL(argv[0]) + arg);
 }
 
 static void
@@ -669,7 +735,7 @@ _ovm_integer_sub (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
     OVM_ASSERT(0);
   }
 
-  _ovm_integer_newc (ovm, dst, INTVAL(argv[0]) - arg);
+  __ovm_integer_newc (ovm, dst, INTVAL(argv[0]) - arg);
 }
 
 struct ovm_class ovm_cl_integer[1] = { {
@@ -686,12 +752,20 @@ struct ovm_class ovm_cl_integer[1] = { {
 
 /***************************************************************************/
 
-void
-_ovm_float_newc (ovm_t ovm, ovm_inst_t * dst, ovm_floatval_t val)
+static void
+__ovm_float_newc (ovm_t ovm, ovm_inst_t * dst, ovm_floatval_t val)
 {
   _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_float));
 
   FLOATVAL(*dst) = val;
+}
+
+void
+_ovm_float_newc (ovm_t ovm, ovm_inst_t * dst, ovm_floatval_t val)
+{
+  _ovm_dst_chk(ovm, dst);
+
+  __ovm_float_newc(ovm, dst, val);
 }
 
 static void
@@ -723,7 +797,7 @@ _ovm_float_add (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
   OVM_ASSERT (ovm_is_kind_of (argv[0], ovm_cl_float));
   OVM_ASSERT (ovm_is_kind_of (argv[1], ovm_cl_float));
 
-  _ovm_float_newc (ovm, dst, FLOATVAL(argv[0]) + FLOATVAL(argv[1]));
+  __ovm_float_newc (ovm, dst, FLOATVAL(argv[0]) + FLOATVAL(argv[1]));
 }
 
 struct ovm_class ovm_cl_float[1] = { {
@@ -811,12 +885,20 @@ __ovm_strval_new(ovm_t ovm, ovm_inst_t *dst, struct ovm_strval *sv)
   *STRVAL(*dst) = *sv;
 }
 
-void
-_ovm_string_newc (ovm_t ovm, ovm_inst_t * dst, char *s)
+static void
+__ovm_string_newc (ovm_t ovm, ovm_inst_t * dst, char *s)
 {
   struct ovm_strval sv[1];
 
   __ovm_strval_new(ovm, dst, __ovm_strval_initc (ovm, sv, 1, strlen (s) + 1, s));
+}
+
+void
+_ovm_string_newc (ovm_t ovm, ovm_inst_t * dst, char *s)
+{
+  _ovm_dst_chk(ovm, dst);
+
+  __ovm_string_newc(ovm, dst, s);
 }
 
 static void
@@ -880,11 +962,11 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 
       OVM_FRAME_ENTER(ovm, fr);
 
-      OVM_STRING_NEWC(ovm, fr->work[0], "<");
+      __ovm_string_newc(ovm, &fr->work[0], "<");
       OVM_INST_NEW(ovm, fr->work[1], ovm_cl_string, CAR(arg));
-      OVM_STRING_NEWC(ovm, fr->work[2], ", ");
+      __ovm_string_newc(ovm, &fr->work[2], ", ");
       OVM_INST_NEW(ovm, fr->work[3], ovm_cl_string, CDR(arg));
-      OVM_STRING_NEWC(ovm, fr->work[4], ">");
+      __ovm_string_newc(ovm, &fr->work[4], ">");
 
       __ovm_strval_inita(ovm, STRVAL(inst), 5, fr->work);
 
@@ -900,10 +982,10 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim, ", ");
+	__ovm_string_newc(ovm, &fr->delim, ", ");
 	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "(");
+	__ovm_string_newc(ovm, q, "(");
 	++q;
 
 	for (i = 0; arg; arg = CDR(arg), ++i) {
@@ -915,7 +997,7 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 	  ++q;
 	}
 
-	_ovm_string_newc(ovm, q, ")");
+	__ovm_string_newc(ovm, q, ")");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -932,10 +1014,10 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim, ", ");
+	__ovm_string_newc(ovm, &fr->delim, ", ");
 	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "[");
+	__ovm_string_newc(ovm, q, "[");
 	++q;
 
 	for (p = ARRAYVAL(arg)->data, i = 0; n; --n, ++i, ++p) {
@@ -947,7 +1029,7 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 	  ++q;
 	}
 
-	_ovm_string_newc(ovm, q, "]");
+	__ovm_string_newc(ovm, q, "]");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -964,10 +1046,10 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim, ", ");
+	__ovm_string_newc(ovm, &fr->delim, ", ");
 	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "{");
+	__ovm_string_newc(ovm, q, "{");
 	++q;
 
 	for (p = SETVAL(arg)->base->data, i = 0, n = SETVAL(arg)->base->size; n; --n, ++p) {
@@ -981,7 +1063,7 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 	  }
 	}
 
-	_ovm_string_newc(ovm, q, "}");
+	__ovm_string_newc(ovm, q, "}");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -998,11 +1080,11 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim[0], ", ");
-	OVM_STRING_NEWC(ovm, fr->delim[1], ": ");
+	__ovm_string_newc(ovm, &fr->delim[0], ", ");
+	__ovm_string_newc(ovm, &fr->delim[1], ": ");
 	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "{");
+	__ovm_string_newc(ovm, q, "{");
 	++q;
 
 	for (p = DICTVAL(arg)->base->base->data, i = 0, n = DICTVAL(arg)->base->base->size; n; --n, ++p) {
@@ -1021,7 +1103,7 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 	  }
 	}
 
-	_ovm_string_newc(ovm, q, "}");
+	__ovm_string_newc(ovm, q, "}");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -1093,9 +1175,9 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
       OVM_FRAME_ENTER(ovm, fr);
       
-      OVM_STRING_NEWC(ovm, fr->work[0], "<Boolean>");
-      OVM_STRING_NEWC(ovm, fr->work[1], BOOLVAL(arg) ? "T" : "F");
-      OVM_STRING_NEWC(ovm, fr->work[2], "</Boolean>");
+      __ovm_string_newc(ovm, &fr->work[0], "<Boolean>");
+      __ovm_string_newc(ovm, &fr->work[1], BOOLVAL(arg) ? "T" : "F");
+      __ovm_string_newc(ovm, &fr->work[2], "</Boolean>");
 		      
       __ovm_strval_inita(ovm, STRVAL(inst), 3, fr->work);
 
@@ -1107,10 +1189,10 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
       OVM_FRAME_ENTER(ovm, fr);
       
-      OVM_STRING_NEWC(ovm, fr->work[0], "<Integer>");
+      __ovm_string_newc(ovm, &fr->work[0], "<Integer>");
       snprintf(buf, sizeof(buf), "%lld", INTVAL(arg));
-      OVM_STRING_NEWC(ovm, fr->work[1], buf);
-      OVM_STRING_NEWC(ovm, fr->work[2], "</Integer>");
+      __ovm_string_newc(ovm, &fr->work[1], buf);
+      __ovm_string_newc(ovm, &fr->work[2], "</Integer>");
 		      
       __ovm_strval_inita(ovm, STRVAL(inst), 3, fr->work);
 
@@ -1122,10 +1204,10 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
       OVM_FRAME_ENTER(ovm, fr);
       
-      OVM_STRING_NEWC(ovm, fr->work[0], "<Float>");
+      __ovm_string_newc(ovm, &fr->work[0], "<Float>");
       snprintf(buf, sizeof(buf), "%Lg", FLOATVAL(arg));
-      OVM_STRING_NEWC(ovm, fr->work[1], buf);
-      OVM_STRING_NEWC(ovm, fr->work[2], "</Float>");
+      __ovm_string_newc(ovm, &fr->work[1], buf);
+      __ovm_string_newc(ovm, &fr->work[2], "</Float>");
 		      
       __ovm_strval_inita(ovm, STRVAL(inst), 3, fr->work);
 
@@ -1162,10 +1244,10 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
       OVM_FRAME_ENTER(ovm, fr);
 
-      OVM_STRING_NEWC(ovm, fr->work[0], "<Pair>");
+      __ovm_string_newc(ovm, &fr->work[0], "<Pair>");
       OVM_INST_NEW(ovm, fr->work[1], ovm_cl_xml, CAR(arg));
       OVM_INST_NEW(ovm, fr->work[2], ovm_cl_xml, CDR(arg));
-      OVM_STRING_NEWC(ovm, fr->work[3], "</Pair>");
+      __ovm_string_newc(ovm, &fr->work[3], "</Pair>");
 
       __ovm_strval_inita(ovm, STRVAL(inst), 4, fr->work);
 
@@ -1181,7 +1263,7 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim, ", ");
+	__ovm_string_newc(ovm, &fr->delim, ", ");
 	
 	q = fr->s;
 	_ovm_string_newc(ovm, q, "(");
@@ -1213,7 +1295,7 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim, ", ");
+	__ovm_string_newc(ovm, &fr->delim, ", ");
 	
 	q = fr->s;
 	_ovm_string_newc(ovm, q, "[");
@@ -1245,7 +1327,7 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim, ", ");
+	__ovm_string_newc(ovm, &fr->delim, ", ");
 	
 	q = fr->s;
 	_ovm_string_newc(ovm, q, "{");
@@ -1279,8 +1361,8 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	OVM_STRING_NEWC(ovm, fr->delim[0], ", ");
-	OVM_STRING_NEWC(ovm, fr->delim[1], ": ");
+	__ovm_string_newc(ovm, &fr->delim[0], ", ");
+	__ovm_string_newc(ovm, &fr->delim[1], ": ");
 	
 	q = fr->s;
 	_ovm_string_newc(ovm, q, "{");
@@ -1618,7 +1700,7 @@ _ovm_dptr_hash (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
 
   OVM_INST_METHOD_CALL (ovm, fr->work, CDR(argv[0]), OVM_INST_METHOD_SEL_HASH);
 
-  _ovm_integer_newc(ovm, dst, h + INTVAL(fr->work));
+  __ovm_integer_newc(ovm, dst, h + INTVAL(fr->work));
 
   OVM_FRAME_LEAVE(ovm);
 }
@@ -1693,7 +1775,7 @@ _ovm_list_hash (ovm_t ovm, ovm_inst_t * dst, unsigned argc,
     h += INTVAL(fr->work);
   }
 
-  _ovm_integer_newc(ovm, dst, h);
+  __ovm_integer_newc(ovm, dst, h);
 
   OVM_FRAME_LEAVE(ovm);
 }
@@ -2045,7 +2127,7 @@ _ovm_set_in (ovm_t ovm, ovm_inst_t *dst, unsigned argc, ovm_inst_t *argv)
   OVM_ASSERT (argc == 1);
   OVM_ASSERT (ovm_inst_of(argv[0]) == ovm_cl_set);
 
-  _ovm_bool_newc (ovm, dst, __ovm_set_find (ovm, argv[0], argv[1], 0) ? 1 : 0);
+  __ovm_bool_newc (ovm, dst, __ovm_set_find (ovm, argv[0], argv[1], 0) ? 1 : 0);
 }
 
 static void
