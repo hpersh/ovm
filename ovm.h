@@ -99,21 +99,22 @@ struct ovm_class;
 struct ovm_inst;
 
 typedef struct ovm_class *ovm_class_t;
-typedef struct ovm_inst  *ovm_inst_t;
-typedef struct ovm       *ovm_t;
+typedef struct ovm_inst *ovm_inst_t;
+typedef struct ovm *ovm_t;
 
 #define OVM_NIL  ((ovm_inst_t) 0)
 
 struct ovm_inst_page;
 
 typedef unsigned char ovm_boolval_t;
-typedef long long     ovm_intval_t;
-typedef long double   ovm_floatval_t;
-typedef void          *ovm_refval_t;
-typedef unsigned      ovm_bmval_unit_t;
-enum {
+typedef long long ovm_intval_t;
+typedef long double ovm_floatval_t;
+typedef void *ovm_refval_t;
+typedef unsigned ovm_bmval_unit_t;
+enum
+{
   OVM_BMVAL_UNIT_BITS_LOG2 = 5,
-  OVM_BMVAL_UNIT_BITS      = 1 << OVM_BMVAL_UNIT_BITS_LOG2
+  OVM_BMVAL_UNIT_BITS = 1 << OVM_BMVAL_UNIT_BITS_LOG2
 };
 
 
@@ -144,7 +145,7 @@ struct ovm_inst
 #define STRVAL(_x)  ((_x)->val->strval)
     struct ovm_bmval
     {
-      unsigned         size;
+      unsigned size;
       ovm_bmval_unit_t *data;
     } bmval[1];
 #define BMVAL(_x)  ((_x)->val->bmval)
@@ -197,6 +198,7 @@ enum
   OVM_INST_METHOD_SEL_IN,
   OVM_INST_METHOD_SEL_MULT,
   OVM_INST_METHOD_SEL_NOT,
+  OVM_INST_METHOD_SEL_PARSE,
   OVM_INST_METHOD_SEL_PUT,
   OVM_INST_METHOD_SEL_SIZE,
   OVM_INST_METHOD_SEL_SUB,
@@ -212,8 +214,8 @@ struct ovm_class
 {
   char *name;
   ovm_class_t parent;
-  void (*new) (struct ovm * ovm, ovm_class_t cl, ovm_inst_t *dst,
-		unsigned argc, ovm_inst_t * argv);
+  void (*new) (struct ovm * ovm, ovm_class_t cl, ovm_inst_t * dst,
+	       unsigned argc, ovm_inst_t * argv);
   void (*init) (struct ovm * ovm, ovm_class_t cl, ovm_inst_t inst,
 		unsigned argc, ovm_inst_t * argv);
   void (*walk) (struct ovm * ovm, ovm_class_t cl, ovm_inst_t inst,
@@ -250,7 +252,7 @@ ovm_inst_of (ovm_inst_t inst)
 struct ovm_frame
 {
   struct ovm_frame *prev;
-  unsigned   size;		/* In insts */
+  unsigned size;		/* In insts */
 #ifndef NDEBUG
   ovm_inst_t *start, *end;
 #endif
@@ -267,7 +269,8 @@ struct ovm
 
   struct ovm_frame *frp;
 
-  struct {
+  struct
+  {
     unsigned long long insts_in_use, insts_max;
     unsigned long long pages_in_use, pages_max;
     unsigned long long mem_in_use, mem_max;
@@ -309,8 +312,13 @@ void _ovm_integer_newc (ovm_t ovm, ovm_inst_t * dst, ovm_intval_t val);
 void ovm_float_newc (ovm_t ovm, ovm_inst_t * dst, ovm_floatval_t val);
 #define OVM_FLOAT_NEWC(_ovm, _dst, _val)  (_ovm_float_newc((_ovm), &(_dst), (_val)))
 
-static struct ovm_strval *__ovm_strval_initv (ovm_t ovm, struct ovm_strval *dst, unsigned argc, struct ovm_strval *argv);
-static struct ovm_strval *__ovm_strval_initc (ovm_t ovm, struct ovm_strval *dst, unsigned argc, ...);
+static struct ovm_strval *__ovm_strval_initv (ovm_t ovm,
+					      struct ovm_strval *dst,
+					      unsigned argc,
+					      struct ovm_strval *argv);
+static struct ovm_strval *__ovm_strval_initc (ovm_t ovm,
+					      struct ovm_strval *dst,
+					      unsigned argc, ...);
 void _ovm_string_newc (ovm_t ovm, ovm_inst_t * dst, char *val);
 #define OVM_STRING_NEWC(_ovm, _dst, _val)  (_ovm_string_newc((_ovm), &(_dst), (_val)))
 
@@ -330,20 +338,22 @@ void _ovm_array_atc_put (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t rcvr,
 
 union ovm_cval
 {
-  ovm_boolval_t     boolval;
-  ovm_intval_t      intval;
-  ovm_floatval_t    floatval;
-  struct {
-    unsigned   size;
+  ovm_boolval_t boolval;
+  ovm_intval_t intval;
+  ovm_floatval_t floatval;
+  struct
+  {
+    unsigned size;
     const char *data;
   } strval[1];
-  struct {
-    unsigned               size;
+  struct
+  {
+    unsigned size;
     const ovm_bmval_unit_t *data;
-  } bmval[1];    
+  } bmval[1];
 };
 typedef union ovm_cval ovm_cval_t[1];
 
 void ovm_cval_get (ovm_t ovm, ovm_cval_t dst, ovm_inst_t inst);
 
-void ovm_stats_print(ovm_t ovm);
+void ovm_stats_print (ovm_t ovm);
