@@ -175,12 +175,6 @@ struct ovm_inst
   } val[1];
 };
 
-static ovm_inst_t _ovm_inst_alloc (ovm_t ovm, ovm_class_t cl);
-static void _ovm_inst_free (ovm_t ovm, ovm_inst_t inst);
-static ovm_inst_t _ovm_inst_retain (ovm_t ovm, ovm_inst_t inst);
-static void _ovm_inst_release (ovm_t ovm, ovm_inst_t inst);
-
-
 struct ovm_inst_page
 {
   struct list list_node[1];
@@ -319,6 +313,9 @@ static struct ovm_strval *__ovm_strval_initv (ovm_t ovm, struct ovm_strval *dst,
 static struct ovm_strval *__ovm_strval_initc (ovm_t ovm, struct ovm_strval *dst, unsigned argc, ...);
 void _ovm_string_newc (ovm_t ovm, ovm_inst_t * dst, char *val);
 #define OVM_STRING_NEWC(_ovm, _dst, _val)  (_ovm_string_newc((_ovm), &(_dst), (_val)))
+
+void _ovm_xml_newc (ovm_t ovm, ovm_inst_t * dst, char *val);
+#define OVM_XML_NEWC(_ovm, _dst, _val)  (_ovm_xml_newc((_ovm), &(_dst), (_val)))
 
 void _ovm_array_newc (ovm_t ovm, ovm_inst_t * dst, unsigned size);
 #define OVM_ARRAY_NEWC(_ovm, _dst, _size)  (_ovm_array_newc((_ovm), &(_dst), (_size)))

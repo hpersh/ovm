@@ -6,6 +6,12 @@
 
 #include "ovm.h"
 
+static void __ovm_inst_free (ovm_t ovm, ovm_inst_t inst);
+static ovm_inst_t __ovm_inst_retain (ovm_t ovm, ovm_inst_t inst);
+static void __ovm_inst_release (ovm_t ovm, ovm_inst_t inst);
+
+static void _ovm_inst_alloc (ovm_t ovm, ovm_class_t cl, ovm_inst_t *dst);
+
 
 unsigned
 ovm_is_subclass_of (ovm_class_t cl1, ovm_class_t cl2)
@@ -48,7 +54,7 @@ _ovm_frame_leave (ovm_t ovm)
   unsigned n;
 
   for (p = (ovm_inst_t *) (fr + 1), n = fr->size; n; --n, ++p)
-    _ovm_inst_release (ovm, *p);
+    __ovm_inst_release (ovm, *p);
 
   ovm->frp = fr->prev;
 }
@@ -98,50 +104,56 @@ ovm_cval_get (ovm_t ovm, ovm_cval_t dst, ovm_inst_t inst)
 
 #define ADD_MAX(_sum, _max, _val)  do { if (((_sum) += (_val)) > (_max))  (_max) = (_sum); } while (0)
 
-static void *
-_ovm_malloc (ovm_t ovm, unsigned size)
+static void
+_ovm_malloc (ovm_t ovm, unsigned size, void **result)
 {
-  void *result = malloc (size);
+  void *p = malloc (size);
 
-  OVM_ASSERT (result != 0);
+  OVM_ASSERT (p != 0);
 
   ADD_MAX(ovm->stats->mem_in_use, ovm->stats->mem_max, size);
 
-  return (result);
-}
-
-static void *
-_ovm_zmalloc (ovm_t ovm, unsigned size)
-{
-  void *result = _ovm_malloc (ovm, size);
-
-  memset (result, 0, size);
-
-  return (result);
+  *result = p;
 }
 
 static void
-_ovm_free(ovm_t ovm, void *p, unsigned size)
+_ovm_zmalloc (ovm_t ovm, unsigned size, void **result)
 {
-  free(p);
+  _ovm_malloc (ovm, size, result);
 
-  ovm->stats->mem_in_use -= size;
+  memset (*result, 0, size);
+}
+
+static void
+_ovm_free(ovm_t ovm, void **p, unsigned size)
+{
+  void *q = *p;
+
+  if (q) {
+    free(q);
+
+    ovm->stats->mem_in_use -= size;
+
+    *p = 0;
+  }
 }
 
 enum {
   _OVM_INST_MAGIC = 0x48504f564d494e53ULL
 };
 
-static ovm_inst_t
-_ovm_inst_alloc (ovm_t ovm, ovm_class_t cl)
+static void
+_ovm_inst_alloc (ovm_t ovm, ovm_class_t cl, ovm_inst_t *dst)
 {
-  ovm_inst_t result;
+  ovm_inst_t r;
 
   if (list_empty(ovm->insts_free)) {
-    struct ovm_inst_page *p = (struct ovm_inst_page *) _ovm_malloc(ovm, ovm->inst_page_size);
+    struct ovm_inst_page *p;
     ovm_inst_t           q;
     unsigned             n;
     
+    _ovm_malloc(ovm, ovm->inst_page_size, (void **) &p);
+
     ADD_MAX(ovm->stats->pages_in_use, ovm->stats->pages_max, 1);
 
     p->in_use_cnt = 0;
@@ -158,27 +170,28 @@ _ovm_inst_alloc (ovm_t ovm, ovm_class_t cl)
     }
   }
 
-  result = FIELD_PTR_TO_STRUCT_PTR(list_first(ovm->insts_free), struct ovm_inst, list_node);
+  r = FIELD_PTR_TO_STRUCT_PTR(list_first(ovm->insts_free), struct ovm_inst, list_node);
 
-  list_erase(result->list_node);
-  list_insert(result->list_node, list_end(ovm->insts_in_use));
+  list_erase(r->list_node);
+  list_insert(r->list_node, list_end(ovm->insts_in_use));
 
 #ifndef NDEBUG
-  result->magic = _OVM_INST_MAGIC;
+  r->magic = _OVM_INST_MAGIC;
 #endif
-  result->ref_cnt = 0;
-  result->inst_of = cl;
-  memset(result->val, 0, sizeof(result->val));
+  r->ref_cnt = 0;
+  r->inst_of = cl;
+  memset(r->val, 0, sizeof(r->val));
 
-  ++result->inst_page->in_use_cnt;
+  ++r->inst_page->in_use_cnt;
 
   ADD_MAX(ovm->stats->insts_in_use, ovm->stats->insts_max, 1);
 
-  return (result);
+  _ovm_assign(ovm, dst, r);
 }
 
+
 static void
-_ovm_inst_free (ovm_t ovm, ovm_inst_t inst)
+__ovm_inst_free (ovm_t ovm, ovm_inst_t inst)
 {
   struct ovm_inst_page *p = inst->inst_page;
   ovm_inst_t           q;
@@ -200,14 +213,14 @@ _ovm_inst_free (ovm_t ovm, ovm_inst_t inst)
 
     list_erase(p->list_node);
 
-    _ovm_free(ovm, p, ovm->inst_page_size);
+    _ovm_free(ovm, (void **) &p, ovm->inst_page_size);
 
     --ovm->stats->pages_in_use;
   }
 }
 
 static ovm_inst_t
-_ovm_inst_retain (ovm_t ovm, ovm_inst_t inst)
+__ovm_inst_retain (ovm_t ovm, ovm_inst_t inst)
 {
   if (inst)
     {
@@ -220,7 +233,7 @@ _ovm_inst_retain (ovm_t ovm, ovm_inst_t inst)
 }
 
 static void
-_ovm_inst_release (ovm_t ovm, ovm_inst_t inst)
+__ovm_inst_release (ovm_t ovm, ovm_inst_t inst)
 {
   if (inst)
     {
@@ -230,7 +243,7 @@ _ovm_inst_release (ovm_t ovm, ovm_inst_t inst)
 	{
 	  ovm_class_t cl = ovm_inst_of (inst);
 
-	  (*cl->walk) (ovm, cl, inst, _ovm_inst_release);
+	  (*cl->walk) (ovm, cl, inst, __ovm_inst_release);
 	  (*cl->free) (ovm, cl, inst);
 	}
     }
@@ -242,8 +255,8 @@ _ovm_assign (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t src)
   ovm_inst_t tmp;
 
   tmp = *dst;
-  *dst = _ovm_inst_retain (ovm, src);
-  _ovm_inst_release (ovm, tmp);
+  *dst = __ovm_inst_retain (ovm, src);
+  __ovm_inst_release (ovm, tmp);
 }
 
 static void inline
@@ -403,7 +416,7 @@ _ovm_inst_new2(ovm_t ovm, ovm_class_t cl, ovm_inst_t *dst, unsigned argc, ovm_in
 
   OVM_FRAME_ENTER(ovm, fr);
 
-  OVM_ASSIGN(ovm, fr->work, _ovm_inst_alloc(ovm, cl));
+  _ovm_inst_alloc(ovm, cl, &fr->work);
 
   (*cl->init)(ovm, cl, fr->work, argc, argv);
 
@@ -500,7 +513,7 @@ _ovm_object_walk (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst,
 static void
 _ovm_object_free (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst)
 {
-  _ovm_inst_free (ovm, inst);
+  __ovm_inst_free (ovm, inst);
 }
 
 struct ovm_class ovm_cl_object[1] = { {
@@ -517,7 +530,7 @@ struct ovm_class ovm_cl_object[1] = { {
 static void
 __ovm_bool_newc (ovm_t ovm, ovm_inst_t * dst, ovm_boolval_t val)
 {
-  _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_bool));
+  _ovm_inst_alloc (ovm, ovm_cl_bool, dst);
 
   BOOLVAL(*dst) = (val != 0);
 }
@@ -530,16 +543,48 @@ _ovm_bool_newc (ovm_t ovm, ovm_inst_t * dst, ovm_boolval_t val)
   __ovm_bool_newc(ovm, dst, val);
 }
 
-static char *
-_whitespace_skip(char *p)
+static void
+_whitespace_skip(char **s, unsigned *n)
 {
-  char c;
+  char     *p = *s;
+  unsigned k = *n;
 
-  for ( ; c = *p; ++p) {
-    if (!isspace(c))  break;
+  for ( ; k; --k, ++p) {
+    if (!isspace(*p))  break;
   }
 
-  return (p);
+  *s = p;
+  *n = k;
+}
+
+static void
+_xml_parse_bool2(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  char c;
+  
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n >= 1);
+  c = *s;
+  OVM_ASSERT(c == '0' || c == '1');
+
+  BOOLVAL(inst) = (c == '1');
+
+  ++s;
+  --n;
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n >= 10 && strncmp(s, "</Boolean>", 10) == 0);
+  s += 10;
+  n -= 10;
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n == 0);
+}
+
+static void
+_xml_parse_bool(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n >= 9 && strncmp(s, "<Boolean>", 9) == 0);
+  _xml_parse_bool2(ovm, inst, s + 9, n - 9);
 }
 
 static void
@@ -552,20 +597,9 @@ _ovm_bool_init(ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
     if (arg_cl == ovm_cl_integer) {
       BOOLVAL(inst) = (INTVAL(arg) != 0);
     } else if (arg_cl == ovm_cl_string) {
-      BOOLVAL(inst) = (strcmp(STRVAL(arg)->data, "#true") == 0);
+      BOOLVAL(inst) = (STRVAL(arg)->size > 1);
     } else if (arg_cl == ovm_cl_xml) {
-      char *p, c;
-
-      p = _whitespace_skip(STRVAL(arg)->data);
-      OVM_ASSERT(strncmp(p, "<Boolean>", 9) == 0);
-      p = _whitespace_skip(p + 9);
-      c = *p;
-      OVM_ASSERT(c == '0' || c == '1');
-      BOOLVAL(inst) = (c == '1');
-      p = _whitespace_skip(p + 1);
-      OVM_ASSERT(strncmp(p, "</Boolean>", 10) == 0);
-      p = _whitespace_skip(p + 10);
-      OVM_ASSERT(*p == 0);
+      _xml_parse_bool(ovm, inst, STRVAL(arg)->data, STRVAL(arg)->size - 1);
     } else {
       OVM_ASSERT(0);
     }
@@ -624,7 +658,7 @@ struct ovm_class ovm_cl_bool[1] = { {
 				     .name = "Boolean",
 				     .parent = ovm_cl_object,
 				     .new  = _ovm_inst_new1,
-				     .init = _ovm_init_parent,
+				     .init = _ovm_bool_init,
 				     .walk = _ovm_walk_parent,
 				     .free = _ovm_free_parent,
 				     .inst_method_func_tbl = {
@@ -654,7 +688,7 @@ struct ovm_class ovm_cl_num[1] = { {
 static void
 __ovm_integer_newc (ovm_t ovm, ovm_inst_t * dst, ovm_intval_t val)
 {
-  _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_integer));
+  _ovm_inst_alloc (ovm, ovm_cl_integer, dst);
 
   INTVAL(*dst) = val;
 }
@@ -665,6 +699,52 @@ _ovm_integer_newc (ovm_t ovm, ovm_inst_t * dst, ovm_intval_t val)
   _ovm_dst_chk(ovm, dst);
 
   __ovm_integer_newc(ovm, dst, val);
+}
+
+static void
+_xml_parse_int2(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  ovm_intval_t val = 0;
+  unsigned     negf = 0;
+
+  _whitespace_skip(&s, &n);
+  if (n > 0 && *s == '-') {
+    negf = 1;
+    ++s;
+    --n;
+  }
+  
+  for (;;) {
+    char c;
+
+    OVM_ASSERT(n > 0);
+    c = *s;
+    if (c == '<')  break;
+    if (isspace(c)) {
+      _whitespace_skip(&s, &n);
+      break;
+    }
+
+    OVM_ASSERT(c >= '0' && c <= '9');
+    val = 10 * val + (c - '0');
+  }
+
+  OVM_ASSERT(n >= 10 && strncmp(s, "</Integer>", 10) == 0);
+  s += 10;
+  n -= 10;
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n == 0);
+
+  if (negf)  val = -val;
+  INTVAL(inst) = val;
+}
+
+static void
+_xml_parse_int(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n >= 9 && strncmp(s, "<Integer>", 9) == 0);
+  _xml_parse_int2(ovm, inst, s + 9, n - 9);
 }
 
 static void
@@ -682,13 +762,7 @@ _ovm_integer_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ov
     } else if (arg_cl == ovm_cl_string) {
       OVM_ASSERT(sscanf(STRVAL(arg)->data, "%lld", &INTVAL(inst)) == 1);
     } else if (arg_cl == ovm_cl_xml) {
-      char *p, c;
-
-      p = _whitespace_skip(STRVAL(arg)->data);
-      OVM_ASSERT(strncmp(p, "<Integer>", 9) == 0);
-      p = _whitespace_skip(p + 9);
-      OVM_ASSERT(sscanf(p, "%lld", &INTVAL(inst)) == 1);
-
+      _xml_parse_int(ovm, inst, STRVAL(arg)->data, STRVAL(arg)->size - 1);
     } else {
       OVM_ASSERT(0);
     }
@@ -755,7 +829,7 @@ struct ovm_class ovm_cl_integer[1] = { {
 static void
 __ovm_float_newc (ovm_t ovm, ovm_inst_t * dst, ovm_floatval_t val)
 {
-  _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_float));
+  _ovm_inst_alloc (ovm, ovm_cl_float, dst);
 
   FLOATVAL(*dst) = val;
 }
@@ -769,6 +843,79 @@ _ovm_float_newc (ovm_t ovm, ovm_inst_t * dst, ovm_floatval_t val)
 }
 
 static void
+_xml_parse_float2(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  unsigned mnegf = 0, dcnt = 0, dpf = 0, ef = 0, enegf = 0;
+  char     *q;
+  unsigned k;
+  
+  _whitespace_skip(&s, &n);
+
+  for (q = s;;) {
+    char c;
+
+    OVM_ASSERT(n > 0);
+    c = *s;
+
+    if (c == '<') {
+      k = s - q;
+      break;
+    }
+    if (isspace(c)) {
+      k = s - q;
+      _whitespace_skip(&s, &n);
+      break;
+    }
+    
+    if (c == '-') {
+      OVM_ASSERT(dcnt == 0);
+      if (ef) {
+	OVM_ASSERT(!enegf);
+	enegf = 1;
+      } else {
+	OVM_ASSERT(!mnegf);
+	mnegf = 1;
+      }
+    } else if (c >= '0' && c <= '9') {
+      ++dcnt;
+    } else if (c == '.') {
+      OVM_ASSERT(!ef && !dpf && dcnt > 0);
+      dpf = 1;
+    } else if ((c | 0x20) == 'e') {
+      OVM_ASSERT(!ef && dcnt > 0);
+      ef = 1;
+      dcnt = 0;
+    }
+
+    ++s;
+    --n;
+  }
+
+  OVM_ASSERT(dcnt > 0);
+  OVM_ASSERT(n >= 8 && strncmp(s, "</Float>", 8) == 0);
+  s += 8;
+  n -= 8;
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n == 0);
+
+  {
+    char buf[k + 1];
+
+    memcpy(buf, q, k);
+    buf[k] = 0;
+
+    OVM_ASSERT(sscanf(buf, "%Lg", &FLOATVAL(inst)) == 1);
+  }
+}
+
+static void
+_xml_parse_float(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  OVM_ASSERT(n >= 7 && strncmp(s, "<Float>", 7) == 0);
+  _xml_parse_float2(ovm, inst, s + 7, n - 7);
+}
+
+static void
 _ovm_float_init(ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_inst_t *argv)
 {
   if (argc > 1) {
@@ -778,6 +925,10 @@ _ovm_float_init(ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_i
 
     if (arg_cl == ovm_cl_integer) {
       FLOATVAL(inst) = (ovm_floatval_t) INTVAL(arg);
+    } else if (arg_cl == ovm_cl_string) {
+      OVM_ASSERT(sscanf(STRVAL(arg)->data, "%Lg", &FLOATVAL(inst)) == 1);
+    } else if (arg_cl == ovm_cl_xml) {
+      _xml_parse_float(ovm, inst, STRVAL(arg)->data, STRVAL(arg)->size - 1);
     } else {
       OVM_ASSERT(0);
     }
@@ -829,7 +980,7 @@ __ovm_strval_initv (ovm_t ovm, struct ovm_strval *dst, unsigned argc,
   ++size;
 
   dst->size = size;
-  dst->data = (char *) _ovm_malloc (ovm, size);
+  _ovm_malloc(ovm, size, (void **) &dst->data);
 
   for (q = dst->data, p = argv, n = argc; n; --n, ++p)
     {
@@ -881,7 +1032,7 @@ __ovm_strval_initc (ovm_t ovm, struct ovm_strval *dst, unsigned argc,
 static void
 __ovm_strval_new(ovm_t ovm, ovm_inst_t *dst, struct ovm_strval *sv)
 {
-  _ovm_assign (ovm, dst, _ovm_inst_alloc (ovm, ovm_cl_string));
+  _ovm_inst_alloc (ovm, ovm_cl_string, dst);
   *STRVAL(*dst) = *sv;
 }
 
@@ -899,6 +1050,74 @@ _ovm_string_newc (ovm_t ovm, ovm_inst_t * dst, char *s)
   _ovm_dst_chk(ovm, dst);
 
   __ovm_string_newc(ovm, dst, s);
+}
+
+static void
+_xml_parse_string2(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  char     *q;
+  unsigned k, kk;
+
+  for (q = s, k = n;;) {
+    OVM_ASSERT(k > 0);
+    if (*q == '<')  break;
+    ++q;
+    --k;
+  }
+
+  kk = n - k;
+  OVM_ASSERT(k >= 9 && strncmp(q, "</String>", 9) == 0);
+  _whitespace_skip(&q, &k);
+  OVM_ASSERT(k == 0);
+
+  {
+    char buf[kk + 1], c;
+
+    for (q = buf; kk; ) {
+      c = *s;
+      if (c == '&') {
+	if (kk >= 6 && strncmp(s, "&quot;", 6) == 0) {
+	  c = '"';
+	  s += 6;
+	  kk -= 6;
+	} else if (kk >= 6 && strncmp(s, "&apos;", 6) == 0) {
+	  c = '\'';
+	  s += 6;
+	  kk -= 6;
+	} else if (kk >= 5 && strncmp(s, "&amp;", 5) == 0) {
+	  c = '&';
+	  s += 5;
+	  kk -= 5;
+	} else if (kk >= 4 && strncmp(s, "&lt;", 4) == 0) {
+	  c = '<';
+	  s += 4;
+	  kk -= 4;
+	} else if (kk >= 4 && strncmp(s, "&gt;", 4) == 0) {
+	  c = '>';
+	  s += 4;
+	  kk -= 4;
+	} else {
+	  OVM_ASSERT(0);
+	}
+      } else {
+	++s;
+	--kk;
+      }
+      
+      *q = c;
+      ++q;
+    }
+
+    __ovm_strval_initc(ovm, STRVAL(inst), 1, q - buf, q);
+  }
+}
+
+static void
+_xml_parse_string(ovm_t ovm, ovm_inst_t inst, char *s, unsigned n)
+{
+  _whitespace_skip(&s, &n);
+  OVM_ASSERT(n >= 8 && strncmp(s, "<String>", 8) == 0);
+  _xml_parse_string2(ovm, inst, s + 8, n - 8);
 }
 
 static void
@@ -934,11 +1153,13 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
       snprintf(buf, sizeof(buf), "%Lg", FLOATVAL(arg));
       __ovm_strval_initc(ovm, STRVAL(inst), 1, strlen(buf) + 1, buf);
     } else if (arg_cl == ovm_cl_xml) {
-      memcpy(STRVAL(inst)->data = _ovm_malloc(ovm, STRVAL(inst)->size = STRVAL(arg)->size), STRVAL(arg)->data, STRVAL(arg)->size);
+      _xml_parse_string(ovm, inst, STRVAL(arg)->data, STRVAL(arg)->size - 1);
     } else if (arg_cl == ovm_cl_bmap) {
       unsigned    k = 2 + BMVAL(arg)->size + (BMVAL(arg)->size - 1) / 4 + 1, n, nn, i;
-      char        buf[k], *q;
+      char        *buf = 0, *q;
       ovm_bmval_unit_t *p, u;
+
+      _ovm_malloc(ovm, k, (void **) &buf);
 
       for (*(q = &buf[k - 1]) = 0, p = BMVAL(arg)->data, i = 0, n = BMVAL(arg)->size; n; ++p) {
 	u = *p;
@@ -951,7 +1172,8 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
       *--q = 'b';
       *--q = '0';
 
-      __ovm_strval_initc(ovm, STRVAL(inst), 1, k, buf);
+      STRVAL(inst)->size = k;
+      STRVAL(inst)->data = buf;
     } else if (arg_cl == ovm_cl_ref) {
       char buf[2 + 18 + 1];
 
@@ -1123,9 +1345,7 @@ _ovm_string_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm
 static void
 _ovm_string_free (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst)
 {
-  char *s = STRVAL(inst)->data;
-
-  if (s)  _ovm_free(ovm, s, STRVAL(inst)->size);
+  _ovm_free(ovm, (void **) &STRVAL(inst)->data, STRVAL(inst)->size);
 
   _ovm_free_parent (ovm, cl, inst);
 }
@@ -1163,6 +1383,16 @@ struct ovm_class ovm_cl_string[1] = { {
 
 /***************************************************************************/
 
+void
+_ovm_xml_newc(ovm_t ovm, ovm_inst_t *dst, char *s)
+{
+  _ovm_dst_chk(ovm, dst);
+
+  _ovm_inst_alloc (ovm, ovm_cl_xml, dst);
+
+  __ovm_strval_initc (ovm, STRVAL(*dst), 1, strlen (s) + 1, s);
+}
+
 static void
 _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_inst_t *argv)
 {
@@ -1171,74 +1401,127 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
     ovm_class_t arg_cl = ovm_inst_of(arg);
 
     if (arg_cl == ovm_cl_bool) {
-      OVM_FRAME_DECL(fr, work[3]);
+      char     *buf = 0;
+      unsigned n = 9 + 1 + 10 + 1;
 
-      OVM_FRAME_ENTER(ovm, fr);
-      
-      __ovm_string_newc(ovm, &fr->work[0], "<Boolean>");
-      __ovm_string_newc(ovm, &fr->work[1], BOOLVAL(arg) ? "T" : "F");
-      __ovm_string_newc(ovm, &fr->work[2], "</Boolean>");
-		      
-      __ovm_strval_inita(ovm, STRVAL(inst), 3, fr->work);
+      _ovm_malloc(ovm, n, (void **) &buf);
 
-      OVM_FRAME_LEAVE(ovm);
+      strcpy(buf, "<Boolean>");
+      buf[9] = BOOLVAL(arg) ? 'T' : 'F';
+      strcpy(buf + 10, "</Boolean>");
+
+      STRVAL(inst)->size = n;
+      STRVAL(inst)->data = buf;
     } else if (arg_cl == ovm_cl_integer) {
-      char buf[32];
+      char     buf[9 + 32 + 10 + 1];
+      unsigned n;
 
-      OVM_FRAME_DECL(fr, work[3]);
+      strcpy(buf, "<Integer>");
+      snprintf(buf + 9, sizeof(buf) - 9, "%lld", INTVAL(arg));
+      n = strlen(buf);
+      strcpy(buf + n, "</Integer>");
 
-      OVM_FRAME_ENTER(ovm, fr);
-      
-      __ovm_string_newc(ovm, &fr->work[0], "<Integer>");
-      snprintf(buf, sizeof(buf), "%lld", INTVAL(arg));
-      __ovm_string_newc(ovm, &fr->work[1], buf);
-      __ovm_string_newc(ovm, &fr->work[2], "</Integer>");
-		      
-      __ovm_strval_inita(ovm, STRVAL(inst), 3, fr->work);
-
-      OVM_FRAME_LEAVE(ovm);
+      STRVAL(inst)->size = n + 10 + 1;
+      _ovm_malloc(ovm, STRVAL(inst)->size, (void **) &STRVAL(inst)->data);
+      memcpy(STRVAL(inst)->data, buf, STRVAL(inst)->size);
     } else if (arg_cl == ovm_cl_float) {
-      char buf[64];
+      char     buf[7 + 64 + 8 + 1];
+      unsigned n;
 
-      OVM_FRAME_DECL(fr, work[3]);
+      strcpy(buf, "<Float>");
+      snprintf(buf + 7, sizeof(buf) - 7, "%Lg", FLOATVAL(arg));
+      n = strlen(buf);
+      strcpy(buf + n, "</Float>");
 
-      OVM_FRAME_ENTER(ovm, fr);
+      STRVAL(inst)->size = n + 8 + 1;
+      _ovm_malloc(ovm, STRVAL(inst)->size, (void **) &STRVAL(inst)->data);
+      memcpy(STRVAL(inst)->data, buf, STRVAL(inst)->size);
+    } else if (arg_cl == ovm_cl_string) {
+      unsigned n, k;
+      char     *buf = 0, *p, *q, c;
+
+      for (k = 8, p = STRVAL(arg)->data, n = STRVAL(arg)->size - 1; n; --n, ++p) {
+	switch (*p) {
+	case '"':
+	case '\'':
+	  k += 6;
+	  break;
+	case '&':
+	  k += 5;
+	  break;
+	case '<':
+	case '>':
+	  k += 4;
+	  break;
+	default:
+	  ++k;
+	}
+      }
+      k += 9 + 1;
+
+      _ovm_malloc(ovm, k, (void **) &buf);
       
-      __ovm_string_newc(ovm, &fr->work[0], "<Float>");
-      snprintf(buf, sizeof(buf), "%Lg", FLOATVAL(arg));
-      __ovm_string_newc(ovm, &fr->work[1], buf);
-      __ovm_string_newc(ovm, &fr->work[2], "</Float>");
-		      
-      __ovm_strval_inita(ovm, STRVAL(inst), 3, fr->work);
+      q = buf;
+      strcpy(q, "<String>");
+      q += 8;
+      
+      for (p = STRVAL(arg)->data, n = STRVAL(arg)->size - 1;
+	   n;
+	   --n, ++p
+	   ) {
+	c = *p;
+	switch (c) {
+	case '"':
+	  strcpy(q, "&quot;");
+	  q += 6;
+	  break;
+	case '\'':
+	  strcpy(q, "&apos;");
+	  q += 6;
+	  break;
+	case '&':
+	  strcpy(q, "&amp;");
+	  q += 5;
+	  break;
+	case '<':
+	  strcpy(q, "&lt;");
+	  q += 4;
+	  break;
+	case '>':
+	  strcpy(q, "&gt;");
+	  q += 4;
+	  break;
+	default:
+	  *q++ = c;
+	}
+      }
+      strcpy(q, "</String>");
 
-      OVM_FRAME_LEAVE(ovm);
+      STRVAL(inst)->size = k;
+      STRVAL(inst)->data = buf;
     } else if (arg_cl == ovm_cl_bmap) {
       unsigned n = bmap_bits_to_units(BMVAL(arg)->size), nn;
-      unsigned k = 1 + bmap_units_to_bytes(n) + 1;
+      unsigned k = 8 + 2 * bmap_units_to_bytes(n) + 9 + 1;
       ovm_bmval_unit_t *p, u;
-      ovm_inst_t *q;
-      
-      OVM_FRAME_DECL(fr, work[k]);
+      char       *buf = 0, *q;
 
-      OVM_FRAME_ENTER(ovm, fr);
+      _ovm_malloc(ovm, k, (void **) &buf);
 
-      q = fr->work;
-      _ovm_string_newc(ovm, q++, "<Bitmap>");
+      q = buf;
+      strcpy(q, "<Bitmap>");
+      q += 8;
 
-      for (q = &fr->work[1], p = BMVAL(arg)->data; n; --n, ++p) {
+      for (p = BMVAL(arg)->data; n; --n, ++p) {
 	for (u = *p, nn = bmap_units_to_bytes(1); nn; --nn, u >>= 8) {
-	  char buf[3];
-	  
-	  snprintf(buf, sizeof(buf), "%02x", u & 0xff);
-	  _ovm_string_newc(ovm, q++, buf);
+	  sprintf(q, "%02x", u & 0xff);
+	  q += 2;
 	}
       }
 
-      _ovm_string_newc(ovm, q++, "</Bitmap>");
+      strcpy(q, "</Bitmap>");
 
-      __ovm_strval_inita(ovm, STRVAL(inst), k, fr->work);
-
-      OVM_FRAME_LEAVE(ovm);
+      STRVAL(inst)->size = k;
+      STRVAL(inst)->data = buf;
     } else if (arg_cl == ovm_cl_pair) {
       OVM_FRAME_DECL(fr, work[4]);
 
@@ -1254,31 +1537,25 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
       OVM_FRAME_LEAVE(ovm);
     } else if (arg_cl == ovm_cl_list) {
       unsigned n = __ovm_list_len(arg);
-      unsigned nn = 2 + (n > 0 ? 2 * n - 1 : n);
+      unsigned nn = 2 + n;
       
       {
 	ovm_inst_t *q;
-	unsigned   i;
-	OVM_FRAME_DECL(fr, delim, s[nn]);
+
+	OVM_FRAME_DECL(fr, s[nn]);
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	__ovm_string_newc(ovm, &fr->delim, ", ");
-	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "(");
+	_ovm_string_newc(ovm, q, "<List>");
 	++q;
 
-	for (i = 0; arg; arg = CDR(arg), ++i) {
-	  if (i > 0) {
-	    _ovm_assign(ovm, q, fr->delim);
-	    ++q;
-	  }
-	  _ovm_inst_new(ovm, q, ovm_cl_string, 1, CAR(arg));
+	for ( ; arg; arg = CDR(arg)) {
+	  _ovm_inst_new(ovm, q, ovm_cl_xml, 1, CAR(arg));
 	  ++q;
 	}
 
-	_ovm_string_newc(ovm, q, ")");
+	_ovm_string_newc(ovm, q, "</List>");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -1286,31 +1563,24 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
       }
     } else if (arg_cl == ovm_cl_array) {
       unsigned n = ARRAYVAL(arg)->size;
-      unsigned nn = 2 + (n > 0 ? 2 * n - 1 : n);
+      unsigned nn = 2 + n;
       
       {
 	ovm_inst_t *q, *p;
-	unsigned   i;
-	OVM_FRAME_DECL(fr, delim, s[nn]);
+	OVM_FRAME_DECL(fr, s[nn]);
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	__ovm_string_newc(ovm, &fr->delim, ", ");
-	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "[");
+	_ovm_string_newc(ovm, q, "<Array>");
 	++q;
 
-	for (p = ARRAYVAL(arg)->data, i = 0; n; --n, ++i, ++p) {
-	  if (i > 0) {
-	    _ovm_assign(ovm, q, fr->delim);
-	    ++q;
-	  }
-	  _ovm_inst_new(ovm, q, ovm_cl_string, 1, *p);
+	for (p = ARRAYVAL(arg)->data; n; --n, ++p) {
+	  _ovm_inst_new(ovm, q, ovm_cl_xml, 1, *p);
 	  ++q;
 	}
 
-	_ovm_string_newc(ovm, q, "]");
+	_ovm_string_newc(ovm, q, "</Array");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -1318,33 +1588,26 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
       }
     } else if (arg_cl == ovm_cl_set) {
       unsigned n = SETVAL(arg)->cnt;
-      unsigned nn = 2 + (n > 0 ? 2 * n - 1 : n);
+      unsigned nn = 2 + n;
       
       {
 	ovm_inst_t *q, *p, r;
-	unsigned   i;
-	OVM_FRAME_DECL(fr, delim, s[nn]);
+	OVM_FRAME_DECL(fr, s[nn]);
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	__ovm_string_newc(ovm, &fr->delim, ", ");
-	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "{");
+	_ovm_string_newc(ovm, q, "<Set>");
 	++q;
 
-	for (p = SETVAL(arg)->base->data, i = 0, n = SETVAL(arg)->base->size; n; --n, ++p) {
-	  for (r = *p; r; r = CDR(r), ++i) {
-	    if (i > 0) {
-	      _ovm_assign(ovm, q, fr->delim);
-	      ++q;
-	    }
+	for (p = SETVAL(arg)->base->data, n = SETVAL(arg)->base->size; n; --n, ++p) {
+	  for (r = *p; r; r = CDR(r)) {
 	    _ovm_inst_new(ovm, q, ovm_cl_string, 1, CAR(r));
 	    ++q;
 	  }
 	}
 
-	_ovm_string_newc(ovm, q, "}");
+	_ovm_string_newc(ovm, q, "</Set>");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -1352,39 +1615,26 @@ _ovm_xml_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst, unsigned argc, ovm_in
       }
     } else if (arg_cl == ovm_cl_dict) {
       unsigned n = DICTVAL(arg)->base->cnt;
-      unsigned nn = 2 + (n > 0 ? 4 * n - 1 : n);
+      unsigned nn = 2 + n;
       
       {
 	ovm_inst_t *q, *p, r;
-	unsigned   i;
-	OVM_FRAME_DECL(fr, delim[2], s[nn]);
+	OVM_FRAME_DECL(fr, s[nn]);
 
 	OVM_FRAME_ENTER(ovm, fr);
 
-	__ovm_string_newc(ovm, &fr->delim[0], ", ");
-	__ovm_string_newc(ovm, &fr->delim[1], ": ");
-	
 	q = fr->s;
-	_ovm_string_newc(ovm, q, "{");
+	_ovm_string_newc(ovm, q, "<Dictionary>");
 	++q;
 
-	for (p = DICTVAL(arg)->base->base->data, i = 0, n = DICTVAL(arg)->base->base->size; n; --n, ++p) {
-	  for (r = *p; r; r = CDR(r), ++i) {
-	    if (i > 0) {
-	      _ovm_assign(ovm, q, fr->delim[0]);
-	      ++q;
-	    }
-
-	    _ovm_inst_new(ovm, q, ovm_cl_string, 1, CAR(CAR(r)));
-	    ++q;
-	    _ovm_assign(ovm, q, fr->delim[1]);
-	    ++q;
-	    _ovm_inst_new(ovm, q, ovm_cl_string, 1, CDR(CAR(r)));
+	for (p = DICTVAL(arg)->base->base->data, n = DICTVAL(arg)->base->base->size; n; --n, ++p) {
+	  for (r = *p; r; r = CDR(r)) {
+	    _ovm_inst_new(ovm, q, ovm_cl_string, 1, CAR(r));
 	    ++q;
 	  }
 	}
 
-	_ovm_string_newc(ovm, q, "}");
+	_ovm_string_newc(ovm, q, "</Dictionary>");
 
 	__ovm_strval_inita(ovm, STRVAL(inst), nn, fr->s);
 
@@ -1424,7 +1674,7 @@ __ovm_bmap_init(ovm_t ovm, ovm_inst_t inst, unsigned size)
 
   BMVAL(inst)->size = size;
   n = bmap_units_to_bytes(bmap_bits_to_units(size));
-  BMVAL(inst)->data = (ovm_bmval_unit_t *) _ovm_malloc(ovm, n);
+  _ovm_malloc(ovm, n, (void **) &BMVAL(inst)->data);
 
   return (n);
 }
@@ -1432,7 +1682,7 @@ __ovm_bmap_init(ovm_t ovm, ovm_inst_t inst, unsigned size)
 static void
 __ovm_bmap_new(ovm_t ovm, ovm_inst_t *dst, unsigned size)
 {
-  _ovm_assign(ovm, dst, _ovm_inst_alloc(ovm, ovm_cl_bmap));
+  _ovm_inst_alloc(ovm, ovm_cl_bmap, dst);
 
   __ovm_bmap_init(ovm, *dst, size);
 }
@@ -1440,7 +1690,7 @@ __ovm_bmap_new(ovm_t ovm, ovm_inst_t *dst, unsigned size)
 void
 ovm_bmap_newc(ovm_t ovm, ovm_inst_t *dst, unsigned size)
 {
-  _ovm_assign(ovm, dst, _ovm_inst_alloc(ovm, ovm_cl_bmap));
+  _ovm_inst_alloc(ovm, ovm_cl_bmap, dst);
 
   memset(BMVAL(*dst)->data, 0, __ovm_bmap_init(ovm, *dst, size));
 }
@@ -1454,7 +1704,7 @@ __ovm_bmap_copy (ovm_t ovm, ovm_inst_t to, ovm_inst_t from)
 static void
 _ovm_bmap_copy (ovm_t ovm, ovm_inst_t *dst, ovm_inst_t src)
 {
-  _ovm_assign(ovm, dst, _ovm_inst_alloc(ovm, ovm_cl_bmap));
+  _ovm_inst_alloc(ovm, ovm_cl_bmap, dst);
 
   __ovm_bmap_copy(ovm, *dst, src);
 }
@@ -1492,9 +1742,7 @@ _ovm_bmap_init (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst,
 static void
 _ovm_bmap_free (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst)
 {
-  ovm_bmval_unit_t *p = BMVAL(inst)->data;
-
-  if (p)  _ovm_free(ovm, p, bmap_units_to_bytes(bmap_bits_to_units(BMVAL(inst)->size)));
+  _ovm_free(ovm, (void **) &BMVAL(inst)->data, bmap_units_to_bytes(bmap_bits_to_units(BMVAL(inst)->size)));
 
   _ovm_free_parent (ovm, cl, inst);
 }
@@ -1805,7 +2053,7 @@ static void
 __ovm_array_init (ovm_t ovm, ovm_inst_t inst, unsigned size)
 {
   ARRAYVAL(inst)->size = size;
-  ARRAYVAL(inst)->data = _ovm_zmalloc (ovm, __ovm_array_size_bytes(size));
+  _ovm_zmalloc (ovm, __ovm_array_size_bytes(size), (void **) &ARRAYVAL(inst)->data);
 }
 
 static void
@@ -1818,8 +2066,7 @@ _ovm_array_copy (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t src)
 
   OVM_FRAME_ENTER (ovm, fr);
 
-  OVM_ASSIGN (ovm, fr->work,
-	      _ovm_inst_alloc (ovm, ovm_inst_of (src)));
+  _ovm_inst_alloc (ovm, ovm_inst_of (src), &fr->work);
 
   __ovm_array_init (ovm, fr->work, ARRAYVAL(src)->size);
 
@@ -1837,11 +2084,9 @@ _ovm_array_copy (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t src)
 void
 _ovm_array_newc (ovm_t ovm, ovm_inst_t * dst, unsigned size)
 {
-  ovm_inst_t inst = _ovm_inst_alloc (ovm, ovm_cl_array);
+  _ovm_inst_alloc (ovm, ovm_cl_array, dst);
 
-  __ovm_array_init (ovm, inst, size);
-
-  _ovm_assign (ovm, dst, inst);
+  __ovm_array_init (ovm, *dst, size);
 }
 
 static void
@@ -1924,9 +2169,7 @@ _ovm_array_walk (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst,
 static void
 _ovm_array_free (ovm_t ovm, ovm_class_t cl, ovm_inst_t inst)
 {
-  ovm_inst_t *p = ARRAYVAL(inst)->data;
-
-  if (p)  _ovm_free(ovm, p, __ovm_array_size_bytes(ARRAYVAL(inst)->size));
+  _ovm_free(ovm, (void **) &ARRAYVAL(inst)->data, __ovm_array_size_bytes(ARRAYVAL(inst)->size));
 
   _ovm_free_parent (ovm, cl, inst);
 }
@@ -1995,8 +2238,7 @@ __ovm_set_put (ovm_t ovm, ovm_inst_t set, ovm_inst_t val)
 
       OVM_FRAME_ENTER (ovm, fr);
 
-      OVM_ASSIGN (ovm, fr->work,
-		  _ovm_inst_alloc (ovm, ovm_cl_list));
+      _ovm_inst_alloc (ovm, ovm_cl_list, &fr->work);
 
       OVM_ASSIGN (ovm, CAR(fr->work), val);
       OVM_ASSIGN (ovm, CDR(fr->work), *b);
@@ -2016,18 +2258,17 @@ _ovm_set_copy (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t src)
 
   OVM_FRAME_ENTER (ovm, fr);
 
-  OVM_ASSIGN (ovm, fr->work,
-	      _ovm_inst_alloc (ovm, ovm_inst_of (src)));
+  _ovm_inst_alloc (ovm, ovm_inst_of (src), &fr->work);
 
   for (q = SETVAL(fr->work)->base->data, p =
 	 SETVAL(src)->base->data, n = SETVAL(src)->base->size; n; --n, ++p, ++q)
     {
       for (s = q, r = *p; r; r = CDR(r))
 	{
-	  _ovm_assign (ovm, s, t = _ovm_inst_alloc (ovm, ovm_cl_list));
-	  OVM_ASSIGN (ovm, CAR(t), CAR(r));
+	  _ovm_inst_alloc (ovm, ovm_cl_list, s);
+	  OVM_ASSIGN (ovm, CAR(*s), CAR(r));
 
-	  s = &CDR(t);
+	  s = &CDR(*s);
 	}
     }
 
@@ -2199,7 +2440,7 @@ static void
 __ovm_dict_at_put (ovm_t ovm, ovm_inst_t dict, ovm_inst_t key,
 		   ovm_inst_t val)
 {
-  ovm_inst_t *p, *b, q, r;
+  ovm_inst_t *p, *b;
 
   p = __ovm_dict_find (ovm, dict, key, &b);
 
@@ -2213,12 +2454,10 @@ __ovm_dict_at_put (ovm_t ovm, ovm_inst_t dict, ovm_inst_t key,
 
       OVM_FRAME_ENTER (ovm, fr);
 
-      OVM_ASSIGN (ovm, fr->work, q =
-		  _ovm_inst_alloc (ovm, ovm_cl_list));
-      OVM_ASSIGN (ovm, CAR(q), r =
-		  _ovm_inst_alloc (ovm, ovm_cl_pair));
-      OVM_ASSIGN (ovm, CAR(r), key);
-      OVM_ASSIGN (ovm, CDR(r), val);
+      _ovm_inst_alloc (ovm, ovm_cl_list, &fr->work);
+      _ovm_inst_alloc (ovm, ovm_cl_pair, &CAR(fr->work));
+      OVM_ASSIGN (ovm, CAR(CAR(fr->work)), key);
+      OVM_ASSIGN (ovm, CDR(CAR(fr->work)), val);
 
       OVM_ASSIGN (ovm, CDR(fr->work), *b);
       _ovm_assign (ovm, b, fr->work);
@@ -2256,8 +2495,7 @@ _ovm_dict_copy (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t src)
 
   OVM_FRAME_ENTER (ovm, fr);
 
-  OVM_ASSIGN (ovm, fr->work,
-	      _ovm_inst_alloc (ovm, ovm_cl_dict));
+  _ovm_inst_alloc (ovm, ovm_cl_dict, &fr->work);
 
   for (q = DICTVAL(fr->work)->base->base->data, p =
 	 DICTVAL(src)->base->base->data, n = DICTVAL(src)->base->base->size; n;
@@ -2265,14 +2503,13 @@ _ovm_dict_copy (ovm_t ovm, ovm_inst_t * dst, ovm_inst_t src)
     {
       for (s = q, r = *p; r; r = CDR(r))
 	{
-	  _ovm_assign (ovm, s, t = _ovm_inst_alloc (ovm, ovm_cl_list));
-	  OVM_ASSIGN (ovm, CAR(t), u =
-		      _ovm_inst_alloc (ovm, ovm_cl_pair));
-	  v = CAR(r);
-	  OVM_ASSIGN (ovm, CAR(u), CAR(v));
-	  OVM_ASSIGN (ovm, CDR(u), CDR(v));
+	  _ovm_inst_alloc (ovm, ovm_cl_list, s);
+	  _ovm_inst_alloc(ovm, ovm_cl_pair, &CAR(*s));
 
-	  s = &CDR(t);
+	  OVM_ASSIGN (ovm, CAR(CAR(*s)), CAR(CAR(r)));
+	  OVM_ASSIGN (ovm, CDR(CAR(*s)), CDR(CAR(r)));
+
+	  s = &CDR(*s);
 	}
     }
 

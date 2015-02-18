@@ -19,13 +19,20 @@ inst_print(ovm_t ovm, ovm_inst_t inst)
   union ovm_cval cv[1];
   OVM_FRAME_DECL(fr, work);
 
-  OVM_FRAME_ENTER(ovm, fr);
+  if (ovm_is_kind_of(inst, ovm_cl_string)) {
+    ovm_cval_get(ovm, cv, inst);
 
-  OVM_INST_NEW(ovm, fr->work, ovm_cl_string, inst);
-  ovm_cval_get(ovm, cv, fr->work);
-  printf("%s", cv->strval->data);
+    printf("%s", cv->strval->data);
+  } else {
+    OVM_FRAME_ENTER(ovm, fr);
+    
+    OVM_INST_NEW(ovm, fr->work, ovm_cl_string, inst);
+    ovm_cval_get(ovm, cv, fr->work);
 
-  OVM_FRAME_LEAVE(ovm);
+    printf("%s", cv->strval->data);
+
+    OVM_FRAME_LEAVE(ovm);
+  }
 }
 
 
@@ -117,6 +124,25 @@ main (void)
   OVM_INST_NEW(ovm, glob->work[9], ovm_cl_xml, glob->work[8]);
 
   inst_print(ovm, glob->work[9]);
+
+#endif
+
+#if 0
+
+  OVM_XML_NEWC(ovm, glob->work[0], "   <Integer>     42   </Integer>  ");
+  
+  OVM_INST_NEW(ovm, glob->work[1], ovm_cl_integer, glob->work[0]);
+
+#endif
+
+#if 0
+  
+  OVM_STRING_NEWC(ovm, glob->work[0], "The rain in Spain's plain is wet");
+
+  OVM_INST_NEW(ovm, glob->work[1], ovm_cl_xml, glob->work[0]);
+
+  inst_print(ovm, glob->work[1]);
+  
 
 #endif
 
