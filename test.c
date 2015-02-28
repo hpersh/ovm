@@ -4,7 +4,7 @@
 
 enum
 {
-  OVM_INST_PAGE_SIZE = 1 << 16
+  OVM_INST_PAGE_SIZE = 4096
 };
 
 
@@ -153,17 +153,57 @@ main (void)
 
 #endif
 
-#if 1
+#if 0
 
   OVM_XML_NEWC (ovm, glob->work[0], "   <Integer>     42   </Integer>  ");
 
   OVM_INST_METHOD_CALL (ovm, glob->work[1], glob->work[0], OVM_INST_METHOD_SEL_PARSE);
 
+  inst_print(ovm, glob->work[1]);
+
+#endif
+
+#if 1
+
+  OVM_XML_NEWC(ovm, glob->work[0], "<Pair>   <Pair> <Integer>    42 </Integer> <Boolean>T</Boolean> </Pair>  <String>foo</String>    </Pair>  ");
+
+  OVM_INST_METHOD_CALL (ovm, glob->work[1], glob->work[0], OVM_INST_METHOD_SEL_PARSE);
+
+  inst_print(ovm, glob->work[1]);
+
+  printf("\n");
+
+  OVM_XML_NEWC(ovm, glob->work[0], "<List>   <Pair> <Integer>    42 </Integer> <Boolean>T</Boolean> </Pair>  <String>foo</String>   <Float>3.1415926 </Float>   </List>  ");
+
+  OVM_INST_METHOD_CALL (ovm, glob->work[1], glob->work[0], OVM_INST_METHOD_SEL_PARSE);
+
+  inst_print(ovm, glob->work[1]);
+
+  printf("\n");
+
+  OVM_XML_NEWC(ovm, glob->work[0], "<Array>   <Pair> <Integer>    42 </Integer> <Boolean>T</Boolean> </Pair>  <String>foo</String>   <Float>3.1415926 </Float>   </Array>  ");
+
+  OVM_INST_METHOD_CALL (ovm, glob->work[1], glob->work[0], OVM_INST_METHOD_SEL_PARSE);
+
+  inst_print(ovm, glob->work[1]);
+
+  printf("\n");
+
+  OVM_XML_NEWC(ovm, glob->work[0], "<Dictionary>   <Pair> <Integer>    42 </Integer> <Boolean>T</Boolean> </Pair>  <Pair> <String>foo</String>   <Float>3.1415926 </Float>   </Pair></Dictionary>  ");
+
+  OVM_INST_METHOD_CALL (ovm, glob->work[1], glob->work[0], OVM_INST_METHOD_SEL_PARSE);
+
+  inst_print(ovm, glob->work[1]);
+
+  printf("\n");
+
 #endif
 
   OVM_FRAME_LEAVE (ovm);
 
+#ifndef NOSTATS
   ovm_stats_print (ovm);
+#endif
 
   return (0);
 }

@@ -5,13 +5,6 @@
 #define FIELD_OFS(s, f)                   (PTR_TO_INT(&((s *) 0)->f))
 #define FIELD_PTR_TO_STRUCT_PTR(p, s, f)  ((s *)((char *)(p) - FIELD_OFS(s, f)))
 
-#ifndef NDEBUG
-#define OVM_DEBUG_ASSERT(_x)  assert(_x)
-#else
-#define OVM_DEBUG_ASSERT(_x)
-#endif
-#define OVM_ASSERT(_x)  assert(_x)
-
 
 struct list
 {
@@ -164,13 +157,14 @@ struct ovm_inst
     struct ovm_setval
     {
       struct ovm_arrayval base[1];
-      unsigned cnt;
 #define OVM_SET_SIZE_DFLT  32
+      unsigned cnt;
     } setval[1];
 #define SETVAL(_x)  ((_x)->val->setval)
     struct ovm_dictval
     {
       struct ovm_setval base[1];
+#define OVM_DICT_SIZE_DFLT  32
     } dictval[1];
 #define DICTVAL(_x)  ((_x)->val->dictval)
   } val[1];
@@ -192,10 +186,12 @@ enum
   OVM_INST_METHOD_SEL_AT_PUT,
   OVM_INST_METHOD_SEL_CAR,
   OVM_INST_METHOD_SEL_CDR,
+  OVM_INST_METHOD_SEL_CNT,
   OVM_INST_METHOD_SEL_DIV,
   OVM_INST_METHOD_SEL_EQUAL,
   OVM_INST_METHOD_SEL_HASH,
   OVM_INST_METHOD_SEL_IN,
+  OVM_INST_METHOD_SEL_MINUS,
   OVM_INST_METHOD_SEL_MULT,
   OVM_INST_METHOD_SEL_NOT,
   OVM_INST_METHOD_SEL_PARSE,
@@ -269,12 +265,14 @@ struct ovm
 
   struct ovm_frame *frp;
 
+#ifndef NOSTATS
   struct
   {
     unsigned long long insts_in_use, insts_max;
     unsigned long long pages_in_use, pages_max;
     unsigned long long mem_in_use, mem_max;
   } stats[1];
+#endif
 };
 
 #define OVM_FRAME_DECL(_nm, ...)  struct { struct ovm_frame hdr[1]; ovm_inst_t __VA_ARGS__; } _nm [1]
